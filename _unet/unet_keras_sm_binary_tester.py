@@ -89,7 +89,7 @@ def dice_coef(y_true, y_pred, smooth=0.001):
 
 def jaccard_loss(y_true, y_pred):
     #return ((1 - jaccard_score_1(y_true, y_pred)) + (1 - jaccard_score_2(y_true, y_pred)) + (1 - jaccard_score_3(y_true, y_pred)))# / 3 + (1 - jaccard_score(y_true, y_pred))# + categorical_focal_loss(alpha=[0.25,.25,.25,.25])(y_true, y_pred)
-    return 1 - weighted_jaccard_score(y_true, y_pred, weights=[0.45,  0.55])
+    return 1 - weighted_jaccard_score(y_true, y_pred, weights=[0.4,  0.6])
 
 
 def jaccard_score(y_true, y_pred, smooth=0.001):
@@ -113,6 +113,13 @@ def jaccard_score_class(y_true, y_pred, cl, smooth=0.001):
     intersection = K.sum(y_true_f * y_pred_f)
     union = K.sum(y_true_f + y_pred_f) - intersection
     return (intersection + smooth) / (union + smooth)
+
+def dice_coef_true_class(y_true, y_pred, smooth=0.001):
+    import numpy as np
+    y_true_f = K.flatten(y_true[...,1])
+    y_pred_f = K.flatten(y_pred[...,1])
+    intersection = K.sum(y_true_f * y_pred_f)
+    return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
 
 
 def jaccard_score_true_class(y_true, y_pred, smooth=0.001):
@@ -139,7 +146,7 @@ curr_class = 'ureter'
 dataset_distribution = 'equal'
 
 
-DATA_DIR = f'../{curr_class}_dataset/'
+DATA_DIR = f'../dataset/'
 
 # x_train_dir = os.path.join(DATA_DIR, 'train_crop/images')
 # y_train_dir = os.path.join(DATA_DIR, 'train_crop/mask')
@@ -149,8 +156,8 @@ DATA_DIR = f'../{curr_class}_dataset/'
 # y_valid_dir = os.path.join(DATA_DIR, 'test_crop/mask')
 # valid_len = len(os.listdir(x_valid_dir))
 
-x_test_dir = os.path.join(DATA_DIR, 'test_cv_set/images')
-y_test_dir = os.path.join(DATA_DIR, 'test_cv_set/mask')
+x_test_dir = os.path.join(DATA_DIR, f'test_dataset_crop/images')
+y_test_dir = os.path.join(DATA_DIR, f'test_dataset_crop/mask')
 
 
 def visualize(fig_name, **images):
@@ -223,6 +230,8 @@ class Dataset:
         mask = cv2.resize(mask, (img_size[0], img_size[1]), interpolation=cv2.INTER_NEAREST)
         #image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
+        mask[mask != 1] = 0
+        mask[mask == 1] = 1
         # fig, ax = plt.subplots(1,2)
         # ax[0].imshow(image)
         # ax[1].imshow(mask)
@@ -450,13 +459,12 @@ test_dataset = Dataset(
 )
 
 test_dataloader = Dataloder(test_dataset, batch_size=1, shuffle=False)
-model_name = 'unet_1_efficientnetb3_weighted_jaccard_loss_8_batch_size_256_size_crop_20_epoch_binary_ureter_0.4_true_weight_equal_set_#5'
+model_name = 'unet_1_efficientnetb3_weighted_jaccard_loss_8_batch_size_256_size_crop_20_epoch_binary_ureter_0.4_true_weight_equal_set_#1'
 model = keras.models.load_model(f'models/binary_{curr_class}/{dataset_distribution}_dataset_distribution/{model_name}.h5',
                                  custom_objects={'jaccard_loss': jaccard_loss, 'jaccard_score_true_class': jaccard_score_true_class, 'jaccard_score_all': jaccard_score_all,
-
-                                                  'dice_coef': dice_coef})
+                                                  'dice_coef': dice_coef_true_class})
 scores = model.evaluate(test_dataloader)
-metrics = [jaccard_score_true_class, jaccard_score_all, dice_coef]
+metrics = [jaccard_score_true_class, jaccard_score_all, dice_coef_true_class, dice_coef]
 f = open(f'results/metrics/{model_name}.txt','w')
 print("Loss: {:.5}".format(scores[0]), file=f)
 for metric, value in zip(metrics, scores[1:]):

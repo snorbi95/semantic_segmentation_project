@@ -184,7 +184,7 @@ def jaccard_score_all(y_true, y_pred, smooth=0.001):
     union = K.sum(y_true_f + y_pred_f) - intersection
     return (intersection) / (union + smooth)
 
-img_size = (224, 224)
+img_size = (256, 256)
 num_classes = 2
 batch_size = 4
 curr_class = 'arthery'

@@ -230,6 +230,9 @@ ureter_model = keras.models.load_model(f'models/binary_ureter/equal_dataset_dist
                                 custom_objects={'jaccard_loss': jaccard_loss, 'jaccard_score_true_class': jaccard_score_true_class, 'jaccard_score_all': jaccard_score_all,
                                                 'dice_coef': dice_coef})
 
+# dot_img_file = f'models/model_plot.png'
+# tf.keras.utils.plot_model(ureter_model, to_file=dot_img_file, show_shapes=True)
+
 nerve_model = keras.models.load_model(f'models/binary_nerve/default_dataset_distribution/unet_1_efficientnetb3_weighted_jaccard_loss_8_batch_size_256_size_crop_20_epoch_binary_nerve_0.01_true_weight_inc_lr.h5',
                                 custom_objects={'jaccard_loss': jaccard_loss, 'jaccard_score_true_class': jaccard_score_true_class, 'jaccard_score_all': jaccard_score_all,
                                                 'dice_coef': dice_coef})

@@ -4,6 +4,7 @@ import operator
 
 import matplotlib.pyplot as plt
 import skimage.color
+from PIL import Image
 from sklearn.utils.extmath import cartesian
 
 from _unet import data
@@ -136,6 +137,27 @@ def dice_coef(y_true, y_pred, smooth=0.001):
     intersection = K.sum(y_true_f * y_pred_f)
     return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
 
+def dice_coef_1(y_true, y_pred, smooth=0.001):
+    import numpy as np
+    y_true_f = K.flatten(y_true[...,1])
+    y_pred_f = K.flatten(y_pred[...,1])
+    intersection = K.sum(y_true_f * y_pred_f)
+    return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
+
+def dice_coef_2(y_true, y_pred, smooth=0.001):
+    import numpy as np
+    y_true_f = K.flatten(y_true[...,2])
+    y_pred_f = K.flatten(y_pred[...,2])
+    intersection = K.sum(y_true_f * y_pred_f)
+    return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
+
+def dice_coef_3(y_true, y_pred, smooth=0.001):
+    import numpy as np
+    y_true_f = K.flatten(y_true[...,3])
+    y_pred_f = K.flatten(y_pred[...,3])
+    intersection = K.sum(y_true_f * y_pred_f)
+    return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
+
 
 def jaccard_loss(y_true, y_pred):
     #return ((1 - jaccard_score_1(y_true, y_pred)) + (1 - jaccard_score_2(y_true, y_pred)) + (1 - jaccard_score_3(y_true, y_pred)))# / 3 + (1 - jaccard_score(y_true, y_pred))# + categorical_focal_loss(alpha=[0.25,.25,.25,.25])(y_true, y_pred)
@@ -222,9 +244,9 @@ img_size = (512, 512)
 model_img_size = (256, 256)
 num_classes = 4
 
-nerve_model_dir = f'models/binary_nerve/default_dataset_distribution'
-artery_model_dir = f'models/binary_arthery/default_dataset_distribution'
-ureter_model_dir = f'models/binary_ureter/default_dataset_distribution'
+nerve_model_dir = f'models/binary_nerve/equal_dataset_distribution'
+artery_model_dir = f'models/binary_arthery/equal_dataset_distribution'
+ureter_model_dir = f'models/binary_ureter/equal_dataset_distribution'
 
 nerve_models = [names for names in os.listdir(nerve_model_dir) if not os.path.isdir(names)]
 artery_models = [names for names in os.listdir(artery_model_dir) if not os.path.isdir(names)]
@@ -242,8 +264,8 @@ BACKBONE = 'efficientnetb3'
 preprocess_input = sm.get_preprocessing(BACKBONE)
 CLASSES = ['background', 'arthery', 'ureter', 'nerve']
 
-test_dir = f'../dataset/test_dataset_crop/images'
-test_mask_dir = f'../dataset/test_dataset_crop/mask'
+test_dir = f'../dataset/test_dataset_crop_fusion/images'
+test_mask_dir = f'../dataset/test_dataset_crop_fusion/mask'
 test_frame_names = os.listdir(test_dir)
 test_dataset = Dataset(
     test_dir,
@@ -259,7 +281,28 @@ indices = np.zeros((model_img_size[0],model_img_size[1],3))
 values = np.zeros((model_img_size[0],model_img_size[1],3))
 
 
-def region_prediction(preds):
+def pixelwise_prediction(indices, values, weights = None):
+    prediction = np.zeros(model_img_size)
+
+    for i in range(model_img_size[0]):
+        for j in range(model_img_size[0]):
+            if np.sum(indices[i, j]) == 0:
+                prediction[i, j] = 0
+            else:
+                max_value = 0
+                max_class = 0
+                for k in range(3):
+                    current_value = values[i, j, k]
+                    if weights:
+                        current_value = current_value * weights[k]
+                    if current_value > max_value and indices[i, j, k] != 0:
+                        max_class = indices[i, j, k]
+                        max_value = current_value
+                prediction[i, j] = max_class
+
+    return prediction
+
+def region_prediction(preds, weights = None):
     from skimage.measure import regionprops, label
     # plt.imshow(values[:,:,1])
     # plt.show()
@@ -275,7 +318,10 @@ def region_prediction(preds):
         values_dict = {}
         for value in values:
             if value != 0:
-                values_dict[value] = pred_region_image[pred_region_image == value].size
+                if weights:
+                    values_dict[value] = pred_region_image[pred_region_image == value].size * weights[int(value) - 1]
+                else:
+                    values_dict[value] = pred_region_image[pred_region_image == value].size
         print(values_dict)
         max_value = max(values_dict.items(), key=operator.itemgetter(1))[0]
         pred_region_image[pred_region_image != 0] = max_value
@@ -284,8 +330,14 @@ def region_prediction(preds):
     # plt.imshow(prediction)
     # plt.show()
 
+def map_values_to_rgb(pred):
+    value_dict = {1: [255,0,0], 2:[0,255,0], 3: [0,0,255]}
+    res = np.zeros((model_img_size[0], model_img_size[1], 3))
+    for k,v in value_dict.items():
+        res[pred == k] = v
+    return res
 
-def region_prediction_mean_confidence(preds, indices_mtx, values_mtx):
+def region_prediction_mean_confidence(preds, indices_mtx, values_mtx, weights = None):
     preds = np.copy(preds)
     from skimage.measure import regionprops, label
     # plt.imshow(values[:,:,1])
@@ -305,8 +357,8 @@ def region_prediction_mean_confidence(preds, indices_mtx, values_mtx):
                 region_indice_values = indices_mtx[reg.bbox[0]: reg.bbox[2],reg.bbox[1]:reg.bbox[3], int(value) - 1]
                 mean_confidence = region_confidence_values[region_indice_values != 0].mean()
                 if mean_confidence > 0.9:
-                    print('Region dropped...')
-                    values_dict[value] = pred_region_image[pred_region_image == value].size
+                    values_dict[value] = pred_region_image[pred_region_image == value].size * mean_confidence
+
         print(values_dict)
         if len(values_dict.items()) > 0:
             max_value = max(values_dict.items(), key=operator.itemgetter(1))[0]
@@ -315,14 +367,15 @@ def region_prediction_mean_confidence(preds, indices_mtx, values_mtx):
     return preds
     # plt.imshow(prediction)
     # plt.show()
-extracted_models = [(0,0,0),(0,0,1), (0,0,2), (0,0,3), (0,0,4), (1,0,0), (1,0,1), (1,0,2), (1,0,3), (1,0,4),(2,0,0), (2,0,1), (2,0,2), (2,0,3), (2,0,4), (3, 0, 0),
-                     (3, 0, 1), (3, 0, 2), (3, 0, 3), (3, 0, 4), (4, 0, 0), (4, 0, 1), (4, 0, 2), (4, 0, 3), (4, 0, 4), (0, 1, 0), (0, 1, 1),
-                     (0,1,2), (0,1,3), (0, 1, 4), (1,1,0), (1,1,1), (1,1,2), (1,1,3), (1,1,4), (2,1,0), (2,1,1), (2,1,2), (2,1,3), (2,1,4),(3,1,0),(3,1,1), (3,1,2),
-                     (3,1,3), (3,1,4), (4,1,0), (4,1,1),(4,1,2),(4,1,3),(4,1,4),(0,2,0),(0,2,1), (0,2,2), (0,2,3), (0,2,4), (1,2,0),(1,2,1), (1,2,2), (1,2,3),(1,2,4),
-                     (2,2,0),(2,2,1),(2,2,2), (2,2,3), (2,2,4), (3,2,0),(3,2,1),(3,2,2),(3,2,3), (3,2,4), (4,2,0), (4,2,1),(4,2,2), (4,2,3), (4,2,4), (0,3,0), (0,3,1), (0,3,2), (0,3,3),
-                     (0,3,4), (1,3,0), (1,3,1), (1,3,2), (1,3,3), (1,3,4), (2,3,0),(2,3,1),(2,3,2),(2,3,3),(2,3,4),(3,3,0),(3,3,1),(3,3,2),(3,3,3),(3,3,4),(4,3,0),(4,3,1),(4,3,2),(4,3,3),
-                     (4,3,4),(0,4,0),(0,4,1),(0,4,2),(0,4,3),(0,4,4),(1,4,0),(1,4,1),(1,4,2),(1,4,3),(1,4,4),(2,4,0),(2,4,1)]#,(2,4,2)]#+,(2,4,3),(2,4,4),(3,4,0),(3,4,1),(3,4,2), (3,4,3),(3,4,4)
-#                    (4,4,0),(4,4,1),(4,4,2),(4,4,3),(4,4,4)]
+# extracted_models = [(0,0,0),(0,0,1), (0,0,2), (0,0,3), (0,0,4), (1,0,0), (1,0,1), (1,0,2), (1,0,3), (1,0,4),(2,0,0), (2,0,1), (2,0,2), (2,0,3), (2,0,4), (3, 0, 0),
+#                      (3, 0, 1), (3, 0, 2), (3, 0, 3), (3, 0, 4), (4, 0, 0), (4, 0, 1), (4, 0, 2), (4, 0, 3), (4, 0, 4), (0, 1, 0), (0, 1, 1),
+#                      (0,1,2), (0,1,3), (0, 1, 4), (1,1,0), (1,1,1), (1,1,2), (1,1,3), (1,1,4), (2,1,0), (2,1,1), (2,1,2), (2,1,3), (2,1,4),(3,1,0),(3,1,1), (3,1,2),
+#                      (3,1,3), (3,1,4), (4,1,0), (4,1,1),(4,1,2),(4,1,3),(4,1,4),(0,2,0),(0,2,1), (0,2,2), (0,2,3), (0,2,4), (1,2,0),(1,2,1), (1,2,2), (1,2,3),(1,2,4),
+#                      (2,2,0),(2,2,1),(2,2,2), (2,2,3), (2,2,4), (3,2,0),(3,2,1),(3,2,2),(3,2,3), (3,2,4), (4,2,0), (4,2,1),(4,2,2), (4,2,3), (4,2,4), (0,3,0), (0,3,1), (0,3,2), (0,3,3),
+#                      (0,3,4), (1,3,0), (1,3,1), (1,3,2), (1,3,3), (1,3,4), (2,3,0),(2,3,1),(2,3,2),(2,3,3),(2,3,4),(3,3,0),(3,3,1),(3,3,2),(3,3,3),(3,3,4),(4,3,0),(4,3,1),(4,3,2),(4,3,3),
+#                      (4,3,4),(0,4,0),(0,4,1),(0,4,2),(0,4,3),(0,4,4),(1,4,0),(1,4,1),(1,4,2),(1,4,3),(1,4,4),(2,4,0),(2,4,1)]#,(2,4,2)]#+,(2,4,3),(2,4,4),(3,4,0),(3,4,1),(3,4,2), (3,4,3),(3,4,4)
+# #                    (4,4,0),(4,4,1),(4,4,2),(4,4,3),(4,4,4)]
+extracted_models = [(3,3,0)]
 
 from numba import cuda
 device = cuda.get_current_device()
@@ -330,7 +383,7 @@ for ureter_num, ureter_model_name in enumerate(ureter_models):
     for artery_num, artery_model_name in enumerate(artery_models):
         for nerve_num, nerve_model_name in enumerate(nerve_models):
             keras.backend.clear_session()
-            if (artery_num, ureter_num, nerve_num) in extracted_models:
+            if (artery_num, ureter_num, nerve_num) not in extracted_models:
                 continue
             indices = np.zeros((model_img_size[0], model_img_size[1], 3))
             values = np.zeros((model_img_size[0], model_img_size[1], 3))
@@ -347,28 +400,49 @@ for ureter_num, ureter_model_name in enumerate(ureter_models):
                                             custom_objects={'jaccard_loss': jaccard_loss, 'jaccard_score_true_class': jaccard_score_true_class, 'jaccard_score_all': jaccard_score_all,
                                                             'dice_coef': dice_coef})
 
-            jaccard_score_pixelwide = 0
+            jaccard_score_pixelwise = 0
+            jaccard_score_pixelwise_weighted = 0
             jaccard_score_region_based = 0
-            jaccard_score_multiclass = 0
+            jaccard_score_region_based_weighted = 0
 
-            dice_score_pixelwide = 0
+            dice_score_pixelwise = 0
+            dice_score_pixelwise_weighted = 0
             dice_score_region_based = 0
-            dice_score_multiclass = 0
+            dice_score_region_based_weighted = 0
 
-            jaccard_score_arthery_pixelwide = 0
+            dice_score_arthery_pixelwise = 0
+            dice_score_arthery_pixelwise_weighted = 0
+            dice_score_arthery_region_based = 0
+            dice_score_arthery_region_based_weighted = 0
+
+            dice_score_ureter_pixelwise = 0
+            dice_score_ureter_pixelwise_weighted = 0
+            dice_score_ureter_region_based = 0
+            dice_score_ureter_region_based_weighted = 0
+
+            dice_score_nerve_pixelwise = 0
+            dice_score_nerve_pixelwise_weighted = 0
+            dice_score_nerve_region_based = 0
+            dice_score_nerve_region_based_weighted = 0
+
+            jaccard_score_arthery_pixelwise = 0
+            jaccard_score_arthery_pixelwise_weighted = 0
             jaccard_score_arthery_region_based = 0
-            jaccard_score_arthery_multiclass = 0
+            jaccard_score_arthery_region_based_weighted = 0
 
-            jaccard_score_ureter_pixelwide = 0
+            jaccard_score_ureter_pixelwise = 0
+            jaccard_score_ureter_pixelwise_weighted = 0
             jaccard_score_ureter_region_based = 0
-            jaccard_score_ureter_multiclass = 0
+            jaccard_score_ureter_region_based_weighted = 0
 
-            jaccard_score_nerve_pixelwide = 0
+            jaccard_score_nerve_pixelwise = 0
+            jaccard_score_nerve_pixelwise_weighted = 0
             jaccard_score_nerve_region_based = 0
-            jaccard_score_nerve_multiclass = 0
+            jaccard_score_nerve_region_based_weighted = 0
 
             for n in range(len(test_dataset)):
                 test_frame_name, y = test_dataset[n]
+                test_frame_original = io.imread(os.path.join(test_dir, test_frame_names[n]))
                 print(f'Predicting image #{n}...')
                 # random_x = np.random.randint(0, test_frame.shape[0] - img_size[0])
                 # random_y = np.random.randint(0, test_frame.shape[1] - img_size[1])
@@ -427,31 +501,80 @@ for ureter_num, ureter_model_name in enumerate(ureter_models):
                 # p3 = p3.astype(np.int32)
                 # p3 = np.concatenate([p3, p3, p3], axis=3)
 
-                # p_multiclass = multiclass_model.predict(np.expand_dims(test_frame, axis=0))
-                # p_multiclass = np.argmax(p_multiclass, axis=-1)
-                # p_multiclass = np.expand_dims(p_multiclass, axis=-1)
-                # p_multiclass = p_multiclass * (255 / num_classes)
-                # p_multiclass = p_multiclass.astype(np.int32)
-                # p_multiclass = np.concatenate([p_multiclass, p_multiclass, p_multiclass], axis=3)
-
-                prediction = np.zeros(model_img_size)
-
-                for i in range(model_img_size[0]):
-                    for j in range(model_img_size[0]):
-                        if np.sum(indices[i, j]) == 0:
-                            prediction[i, j] = 0
-                        else:
-                            max_value = 0
-                            max_class = 0
-                            for k in range(3):
-                                if values[i, j, k] > max_value and indices[i, j, k] != 0:
-                                    max_class = indices[i, j, k]
-                                    max_value = values[i, j, k]
-                            prediction[i, j] = max_class
+                prediction = pixelwise_prediction(indices, values)
+                weighted_prediction = pixelwise_prediction(indices, values, weights=[0.8218,0.883,0.8214])
 
                 #print(jaccard_score_all(y, tf.keras.utils.to_categorical(prediction, num_classes= 4).astype('float64')))
                 reg_pred_1 = region_prediction(np.copy(prediction))
                 reg_pred_2 = region_prediction_mean_confidence(np.copy(prediction), indices, values)
+                # fig, ax = plt.subplots(2,4)
+                # ax[0,0].imshow(denormalize(test_frame))
+                # ax[0,1].imshow(map_values_to_rgb(indices_p1), vmax = 255.0)
+                # ax[0,1].set_title('Arthery')
+                # ax[1,0].imshow(map_values_to_rgb(indices_p2), vmax = 255.0)
+                # ax[1,0].set_title('Ureter')
+                # ax[1,1].imshow(map_values_to_rgb(indices_p3), vmax = 255.0)
+                # ax[1,1].set_title('Nerve')
+                # ax[0,2].imshow(map_values_to_rgb(prediction), vmax = 255.0)
+                # ax[0,2].set_title('Combined prediction')
+                # ax[1,2].imshow(np.argmax(y, axis=-1) * (255/ 4), vmax = 255.0)
+                # ax[1,2].set_title('Ground truth')
+                # ax[0,3].imshow(map_values_to_rgb(reg_pred_1), vmax = 255.0)
+                # ax[0,3].set_title('Region prediction')
+                # # ax[1,3].imshow(p_multiclass[0,:], vmax = 255.0)
+                # # ax[1,3].set_title('Multiclass prediction')
+                # plt.show()
+
+
+                # # # ax[2,0].imshow(p_multiclass[0,:,:,:] * (255/ 4), vmax = 255.0)
+                # # # ax[2,0].set_title('Multiclass prediction')
+                #p_multiclass = np.max(p_multiclass, axis=-1) / (255 / 4)
+                # plt.savefig(f'results/4_classes/combined_preds/{n}_all.png')
+                # plt.clf()
+                image = test_frame_original
+                image = cv2.resize(image, (img_size[0], img_size[1]))
+                ground_truth = map_values_to_rgb(np.argmax(y, axis=-1))
+                ground_truth = cv2.resize(ground_truth, (img_size[0], img_size[1]))
+                pix_pred = map_values_to_rgb(prediction)
+                pix_pred = cv2.resize(pix_pred, (img_size[0], img_size[1]))
+                w_pix_pred = map_values_to_rgb(weighted_prediction)
+                w_pix_pred = cv2.resize(w_pix_pred, (img_size[0], img_size[1]))
+                reg_pred = map_values_to_rgb(reg_pred_1)
+                reg_pred = cv2.resize(reg_pred, (img_size[0], img_size[1]))
+                w_reg_pred = map_values_to_rgb(reg_pred_2)
+                w_reg_pred = cv2.resize(w_reg_pred, (img_size[0], img_size[1]))
+
+                # plt.imshow(image)
+                # plt.show()
+
+                # Plotting fusion results
+                # fig, ax = plt.subplots(1,6)
+                # ax[0].imshow(image)
+                # ax[0].set_title('Input image', fontdict = {'size': 12})
+                # ax[0].set_xticks([])
+                # ax[0].set_yticks([])
+                # ax[1].imshow(np.array(Image.blend(Image.fromarray(image.astype(np.uint8)), Image.fromarray(ground_truth.astype(np.uint8)), 0.35)))
+                # ax[1].set_title('Fusion with Ground Truth', fontdict = {'size': 12})
+                # ax[1].set_xticks([])
+                # ax[1].set_yticks([])
+                # ax[2].imshow(np.array(Image.blend(Image.fromarray(image.astype(np.uint8)), Image.fromarray(pix_pred.astype(np.uint8)), 0.35)))
+                # ax[2].set_title('Fusion with Pixel-wise ensemble', fontdict = {'size': 12})
+                # ax[2].set_xticks([])
+                # ax[2].set_yticks([])
+                # ax[3].imshow(np.array(Image.blend(Image.fromarray(image.astype(np.uint8)), Image.fromarray(w_pix_pred.astype(np.uint8)), 0.35)))
+                # ax[3].set_title('Fusion with Weighted Pixel-wise ensemble', fontdict = {'size': 12})
+                # ax[3].set_xticks([])
+                # ax[3].set_yticks([])
+                # ax[4].imshow(np.array(Image.blend(Image.fromarray(image.astype(np.uint8)), Image.fromarray(reg_pred.astype(np.uint8)), 0.35)))
+                # ax[4].set_title('Fusion with Region-based ensemble', fontdict = {'size': 12})
+                # ax[4].set_xticks([])
+                # ax[4].set_yticks([])
+                # ax[5].imshow(np.array(Image.blend(Image.fromarray(image.astype(np.uint8)), Image.fromarray(w_reg_pred.astype(np.uint8)), 0.35)))
+                # ax[5].set_title('Fusion with weighted Region-based ensemble', fontdict = {'size': 12})
+                # ax[5].set_xticks([])
+                # ax[5].set_yticks([])
+                # plt.show()
+
                 # fig, ax = plt.subplots(2,4)
                 # ax[0,0].imshow(denormalize(test_frame))
                 # ax[0,1].imshow(indices_p1* (255/ 4), vmax = 255.0)
@@ -468,101 +591,199 @@ for ureter_num, ureter_model_name in enumerate(ureter_models):
                 # ax[0,3].set_title('Region prediction')
                 # # ax[1,3].imshow(p_multiclass[0,:], vmax = 255.0)
                 # # ax[1,3].set_title('Multiclass prediction')
-                # #plt.show()
-                # # # ax[2,0].imshow(p_multiclass[0,:,:,:] * (255/ 4), vmax = 255.0)
-                # # # ax[2,0].set_title('Multiclass prediction')
-                #p_multiclass = np.max(p_multiclass, axis=-1) / (255 / 4)
-                # plt.savefig(f'results/4_classes/combined_preds/{n}_all.png')
-                # plt.clf()
+                # plt.show()
 
                 #print(weighted_hausdorff_distance(model_img_size[0], model_img_size[1],0.001)(y, tf.keras.utils.to_categorical(prediction, num_classes= 4).astype('float64')))
 
-                jaccard_score_pixelwide += K.eval(jaccard_score_all(y, tf.keras.utils.to_categorical(prediction, num_classes= 4).astype('float64')))
-                jaccard_score_region_based += K.eval(jaccard_score_all(y, tf.keras.utils.to_categorical(reg_pred_1, num_classes=4).astype('float64')))
-                # jaccard_score_multiclass += K.eval(jaccard_score_all(y, tf.keras.utils.to_categorical(p_multiclass, num_classes=4).astype('float64')))
-
-                dice_score_pixelwide += K.eval(dice_coef(y, tf.keras.utils.to_categorical(prediction, num_classes= 4).astype('float64')))
-                dice_score_region_based += K.eval(dice_coef(y, tf.keras.utils.to_categorical(reg_pred_1, num_classes=4).astype('float64')))
-                # dice_score_multiclass += K.eval(dice_coef(y, tf.keras.utils.to_categorical(p_multiclass, num_classes=4).astype('float64')))
+                jaccard_score_pixelwise += K.eval(
+                    jaccard_score_all(y, tf.keras.utils.to_categorical(prediction, num_classes= 4).astype('float64')))
+                jaccard_score_pixelwise_weighted += K.eval(
+                    jaccard_score_all(y, tf.keras.utils.to_categorical(weighted_prediction, num_classes=4).astype('float64')))
+                jaccard_score_region_based += K.eval(
+                    jaccard_score_all(y, tf.keras.utils.to_categorical(reg_pred_1, num_classes=4).astype('float64')))
+                jaccard_score_region_based_weighted += K.eval(
+                    jaccard_score_all(y, tf.keras.utils.to_categorical(reg_pred_2, num_classes=4).astype('float64')))
+                dice_score_pixelwise += K.eval(
+                    dice_coef(y, tf.keras.utils.to_categorical(prediction, num_classes= 4).astype('float64')))
+                dice_score_pixelwise_weighted += K.eval(
+                    dice_coef(y, tf.keras.utils.to_categorical(weighted_prediction, num_classes= 4).astype('float64')))
+                dice_score_region_based += K.eval(
+                    dice_coef(y, tf.keras.utils.to_categorical(reg_pred_1, num_classes=4).astype('float64')))
+                dice_score_region_based_weighted += K.eval(
+                    dice_coef(y, tf.keras.utils.to_categorical(reg_pred_2, num_classes=4).astype('float64')))
 
                 if np.max(np.argmax(y, axis= - 1)) == 3:
-                    jaccard_score_arthery_pixelwide += 0#K.eval(jaccard_score_1(y, tf.keras.utils.to_categorical(prediction, num_classes= 4).astype('float64')))
-                    jaccard_score_arthery_region_based += 0#K.eval(jaccard_score_1(y, tf.keras.utils.to_categorical(reg_pred_1, num_classes=4).astype('float64')))
-                    jaccard_score_arthery_multiclass += 0#K.eval(jaccard_score_1(y, tf.keras.utils.to_categorical(p_multiclass, num_classes=4).astype('float64')))
+                    jaccard_score_arthery_pixelwise += 0
+                    jaccard_score_arthery_pixelwise_weighted += 0
+                    jaccard_score_arthery_region_based += 0
+                    jaccard_score_arthery_region_based_weighted += 0
 
-                    jaccard_score_ureter_pixelwide += 0#K.eval(jaccard_score_2(y, tf.keras.utils.to_categorical(prediction, num_classes= 4).astype('float64')))
-                    jaccard_score_ureter_region_based += 0#K.eval(jaccard_score_2(y, tf.keras.utils.to_categorical(reg_pred_1, num_classes=4).astype('float64')))
-                    jaccard_score_ureter_multiclass += 0#K.eval(jaccard_score_2(y, tf.keras.utils.to_categorical(p_multiclass, num_classes=4).astype('float64')))
+                    dice_score_arthery_pixelwise += 0
+                    dice_score_arthery_pixelwise_weighted += 0
+                    dice_score_arthery_region_based += 0
+                    dice_score_arthery_region_based_weighted += 0
+
+                    jaccard_score_ureter_pixelwise += 0
+                    jaccard_score_ureter_pixelwise_weighted += 0
+                    jaccard_score_ureter_region_based += 0
+                    jaccard_score_ureter_region_based_weighted += 0
+
+                    dice_score_ureter_pixelwise += 0
+                    dice_score_ureter_pixelwise_weighted += 0
+                    dice_score_ureter_region_based += 0
+                    dice_score_ureter_region_based_weighted += 0
                 else:
-                    jaccard_score_arthery_pixelwide += K.eval(
+                    jaccard_score_arthery_pixelwise += K.eval(
                         jaccard_score_1(y, tf.keras.utils.to_categorical(prediction, num_classes=4).astype('float64')))
+                    jaccard_score_arthery_pixelwise_weighted += K.eval(
+                        jaccard_score_1(y, tf.keras.utils.to_categorical(weighted_prediction, num_classes=4).astype('float64')))
                     jaccard_score_arthery_region_based += K.eval(
                         jaccard_score_1(y, tf.keras.utils.to_categorical(reg_pred_1, num_classes=4).astype('float64')))
-                    # jaccard_score_arthery_multiclass += K.eval(jaccard_score_1(y, tf.keras.utils.to_categorical(
-                    #     p_multiclass, num_classes=4).astype('float64')))
+                    jaccard_score_arthery_region_based_weighted += K.eval(
+                        jaccard_score_1(y, tf.keras.utils.to_categorical(reg_pred_2, num_classes=4).astype('float64')))
 
-                    jaccard_score_ureter_pixelwide += K.eval(
+                    dice_score_arthery_pixelwise += K.eval(
+                        dice_coef_1(y, tf.keras.utils.to_categorical(prediction, num_classes=4).astype('float64')))
+                    dice_score_arthery_pixelwise_weighted += K.eval(
+                        dice_coef_1(y, tf.keras.utils.to_categorical(weighted_prediction, num_classes=4).astype('float64')))
+                    dice_score_arthery_region_based += K.eval(
+                        dice_coef_1(y, tf.keras.utils.to_categorical(reg_pred_1, num_classes=4).astype('float64')))
+                    dice_score_arthery_region_based_weighted += K.eval(
+                        dice_coef_1(y, tf.keras.utils.to_categorical(reg_pred_2, num_classes=4).astype('float64')))
+
+
+                    jaccard_score_ureter_pixelwise += K.eval(
                         jaccard_score_2(y, tf.keras.utils.to_categorical(prediction, num_classes=4).astype('float64')))
+                    jaccard_score_ureter_pixelwise_weighted += K.eval(
+                        jaccard_score_2(y, tf.keras.utils.to_categorical(weighted_prediction, num_classes=4).astype('float64')))
                     jaccard_score_ureter_region_based += K.eval(
                         jaccard_score_2(y, tf.keras.utils.to_categorical(reg_pred_1, num_classes=4).astype('float64')))
-                    # jaccard_score_ureter_multiclass += K.eval(jaccard_score_2(y, tf.keras.utils.to_categorical(
-                    #     p_multiclass, num_classes=4).astype('float64')))
+                    jaccard_score_ureter_region_based_weighted += K.eval(
+                        jaccard_score_2(y, tf.keras.utils.to_categorical(reg_pred_2, num_classes=4).astype('float64')))
 
-                jaccard_score_nerve_pixelwide += K.eval(jaccard_score_3(y, tf.keras.utils.to_categorical(prediction, num_classes= 4).astype('float64')))
-                jaccard_score_nerve_region_based += K.eval(jaccard_score_3(y, tf.keras.utils.to_categorical(reg_pred_1, num_classes=4).astype('float64')))
-                # jaccard_score_nerve_multiclass += K.eval(jaccard_score_3(y,tf.keras.utils.to_categorical(p_multiclass,num_classes=4).astype('float64')))
+                    dice_score_ureter_pixelwise += K.eval(
+                        dice_coef_2(y, tf.keras.utils.to_categorical(prediction, num_classes=4).astype('float64')))
+                    dice_score_ureter_pixelwise_weighted += K.eval(
+                        dice_coef_2(y, tf.keras.utils.to_categorical(weighted_prediction, num_classes=4).astype('float64')))
+                    dice_score_ureter_region_based += K.eval(
+                        dice_coef_2(y, tf.keras.utils.to_categorical(reg_pred_1, num_classes=4).astype('float64')))
+                    dice_score_ureter_region_based_weighted += K.eval(
+                        dice_coef_2(y, tf.keras.utils.to_categorical(reg_pred_2, num_classes=4).astype('float64')))
+
+                jaccard_score_nerve_pixelwise += K.eval(
+                    jaccard_score_3(y, tf.keras.utils.to_categorical(prediction, num_classes= 4).astype('float64')))
+                jaccard_score_nerve_pixelwise_weighted += K.eval(
+                    jaccard_score_3(y, tf.keras.utils.to_categorical(weighted_prediction, num_classes= 4).astype('float64')))
+                jaccard_score_nerve_region_based += K.eval(
+                    jaccard_score_3(y, tf.keras.utils.to_categorical(reg_pred_1, num_classes=4).astype('float64')))
+                jaccard_score_nerve_region_based_weighted += K.eval(
+                    jaccard_score_3(y, tf.keras.utils.to_categorical(reg_pred_2, num_classes=4).astype('float64')))
+
+                dice_score_nerve_pixelwise += K.eval(
+                    dice_coef_3(y, tf.keras.utils.to_categorical(prediction, num_classes=4).astype('float64')))
+                dice_score_nerve_pixelwise_weighted += K.eval(
+                    dice_coef_3(y, tf.keras.utils.to_categorical(weighted_prediction, num_classes=4).astype(
+                        'float64')))
+                dice_score_nerve_region_based += K.eval(
+                    dice_coef_3(y, tf.keras.utils.to_categorical(reg_pred_1, num_classes=4).astype('float64')))
+                dice_score_nerve_region_based_weighted += K.eval(
+                    dice_coef_3(y, tf.keras.utils.to_categorical(reg_pred_2, num_classes=4).astype('float64')))
+
+                fig, ax = plt.subplots(1,4)
+                ax[0].imshow(denormalize(test_frame))
+                ax[0].imshow(map_values_to_rgb(prediction), vmax = 255.0)
+                ax[0].set_title('Pixel-wise')
+                ax[1].imshow(map_values_to_rgb(weighted_prediction), vmax = 255.0)
+                ax[1].set_title('Weighted Pixel-wise')
+                ax[2].imshow(map_values_to_rgb(reg_pred_1), vmax = 255.0)
+                ax[2].set_title('Region-based')
+                ax[3].imshow(map_values_to_rgb(prediction), vmax = 255.0)
+                ax[3].set_title('Weighted Region-based')
+                # ax[1,3].imshow(p_multiclass[0,:], vmax = 255.0)
+                # ax[1,3].set_title('Multiclass prediction')
+                plt.show()
+
+                print(jaccard_score_ureter_pixelwise)
+                print(dice_score_ureter_pixelwise)
+
+                print(jaccard_score_ureter_pixelwise_weighted)
+                print(dice_score_ureter_pixelwise_weighted)
+
+                print(jaccard_score_ureter_region_based)
+                print(dice_score_ureter_region_based)
+
+                print(jaccard_score_ureter_region_based_weighted)
+                print(dice_score_ureter_region_based_weighted)
+
+                print(jaccard_score_pixelwise)
+                print(dice_score_pixelwise)
+
+                print(jaccard_score_pixelwise_weighted)
+                print(dice_score_pixelwise_weighted)
+
+                print(jaccard_score_region_based)
+                print(dice_score_region_based)
+
+                print(jaccard_score_region_based_weighted)
+                print(dice_score_region_based_weighted)
                 del y
                 del test_frame
 
-
-            jaccard_score_pixelwide = jaccard_score_pixelwide / len(test_dataset)
+            jaccard_score_pixelwise = jaccard_score_pixelwise / len(test_dataset)
+            jaccard_score_pixelwise_weighted = jaccard_score_pixelwise_weighted / len(test_dataset)
             jaccard_score_region_based = jaccard_score_region_based / len(test_dataset)
-            jaccard_score_multiclass = jaccard_score_multiclass / len(test_dataset)
+            jaccard_score_region_based_weighted = jaccard_score_region_based_weighted / len(test_dataset)
 
-            dice_score_pixelwide = dice_score_pixelwide / len(test_dataset)
+            dice_score_pixelwise = dice_score_pixelwise / len(test_dataset)
+            dice_score_pixelwise_weighted = dice_score_pixelwise_weighted / len(test_dataset)
             dice_score_region_based = dice_score_region_based / len(test_dataset)
-            dice_score_multiclass = dice_score_multiclass / len(test_dataset)
+            dice_score_region_based_weighted = dice_score_region_based_weighted / len(test_dataset)
 
-            jaccard_score_arthery_pixelwide = jaccard_score_arthery_pixelwide / (len(test_dataset) - 228)
+            jaccard_score_arthery_pixelwise = jaccard_score_arthery_pixelwise / (len(test_dataset) - 228)
+            jaccard_score_arthery_pixelwise_weighted = jaccard_score_arthery_pixelwise_weighted / (len(test_dataset) - 228)
             jaccard_score_arthery_region_based = jaccard_score_arthery_region_based / (len(test_dataset) - 228)
-            jaccard_score_arthery_multiclass = jaccard_score_arthery_multiclass / (len(test_dataset) - 228)
+            jaccard_score_arthery_region_based_weighted = jaccard_score_arthery_region_based_weighted / (len(test_dataset) - 228)
 
-            jaccard_score_ureter_pixelwide = jaccard_score_ureter_pixelwide / (len(test_dataset) - 228)
+            dice_score_arthery_pixelwise = dice_score_arthery_pixelwise / (len(test_dataset) - 228)
+            dice_score_arthery_pixelwise_weighted = dice_score_arthery_pixelwise_weighted / (len(test_dataset) - 228)
+            dice_score_arthery_region_based = dice_score_arthery_region_based / (len(test_dataset) - 228)
+            dice_score_arthery_region_based_weighted = dice_score_arthery_region_based_weighted / (len(test_dataset) - 228)
+
+            jaccard_score_ureter_pixelwise = jaccard_score_ureter_pixelwise / (len(test_dataset) - 228)
+            jaccard_score_ureter_pixelwise_weighted = jaccard_score_ureter_pixelwise_weighted / (len(test_dataset) - 228)
             jaccard_score_ureter_region_based = jaccard_score_ureter_region_based / (len(test_dataset) - 228)
-            jaccard_score_ureter_multiclass = jaccard_score_ureter_multiclass / (len(test_dataset) - 228)
+            jaccard_score_ureter_region_based_weighted = jaccard_score_ureter_region_based_weighted / (len(test_dataset) - 228)
 
-            jaccard_score_nerve_pixelwide = jaccard_score_nerve_pixelwide / len(test_dataset)
+            dice_score_ureter_pixelwise = dice_score_ureter_pixelwise / (len(test_dataset) - 228)
+            dice_score_ureter_pixelwise_weighted = dice_score_ureter_pixelwise_weighted / (len(test_dataset) - 228)
+            dice_score_ureter_region_based = dice_score_ureter_region_based / (len(test_dataset) - 228)
+            dice_score_ureter_region_based_weighted = dice_score_ureter_region_based_weighted / (len(test_dataset) - 228)
+
+            jaccard_score_nerve_pixelwise = jaccard_score_nerve_pixelwise / len(test_dataset)
+            jaccard_score_nerve_pixelwise_weighted = jaccard_score_nerve_pixelwise_weighted / len(test_dataset)
             jaccard_score_nerve_region_based = jaccard_score_nerve_region_based / len(test_dataset)
-            jaccard_score_nerve_multiclass = jaccard_score_nerve_multiclass / len(test_dataset)
+            jaccard_score_nerve_region_based_weighted = jaccard_score_nerve_region_based_weighted / len(test_dataset)
 
-            with open(f'results/ensemble_results_default.csv', 'a', newline='') as f:
+            dice_score_nerve_pixelwise = dice_score_nerve_pixelwise / len(test_dataset)
+            dice_score_nerve_pixelwise_weighted = dice_score_nerve_pixelwise_weighted / len(test_dataset)
+            dice_score_nerve_region_based = dice_score_nerve_region_based / len(test_dataset)
+            dice_score_nerve_region_based_weighted = dice_score_nerve_region_based_weighted / len(test_dataset)
+            #
+            with open(f'results/ensemble_results_equal.csv', 'a', newline='') as f:
                 writer = csv.writer(f, delimiter = ',')
-                writer.writerow([f'{artery_num}_{ureter_num}_{nerve_num}',jaccard_score_arthery_pixelwide, jaccard_score_arthery_region_based, jaccard_score_ureter_pixelwide, jaccard_score_ureter_region_based
-                                 , jaccard_score_nerve_pixelwide, jaccard_score_nerve_region_based, jaccard_score_pixelwide, jaccard_score_region_based, dice_score_pixelwide, dice_score_region_based])
-            print(f'Pixelwide jaccard score: {jaccard_score_pixelwide}')
-            print(f'Region based jaccard score: {jaccard_score_region_based}')
-            print(f'Multiclass jaccard score: {jaccard_score_multiclass}\n')
-
-            print(f'Pixelwide dice score: {dice_score_pixelwide}')
-            print(f'Region based dice score: {dice_score_region_based}')
-            print(f'Multiclass dice score: {dice_score_multiclass}\n')
-
-            print(f'Pixelwide jaccard score of arthery: {jaccard_score_arthery_pixelwide}')
-            print(f'Region based jaccard score of arthery: {jaccard_score_arthery_region_based}')
-            print(f'Multiclass jaccard score of arthery: {jaccard_score_arthery_multiclass}\n')
-
-            print(f'Pixelwide jaccard score of ureter: {jaccard_score_ureter_pixelwide}')
-            print(f'Region based jaccard score of ureter: {jaccard_score_ureter_region_based}')
-            print(f'Multiclass jaccard score of ureter: {jaccard_score_ureter_multiclass}\n')
-
-            print(f'Pixelwide jaccard score of nerve: {jaccard_score_nerve_pixelwide}')
-            print(f'Region based jaccard score of nerve: {jaccard_score_nerve_region_based}')
-            print(f'Multiclass jaccard score of nerve: {jaccard_score_nerve_multiclass}\n')
+                writer.writerow([f'{artery_num}_{ureter_num}_{nerve_num}', jaccard_score_arthery_pixelwise, jaccard_score_arthery_pixelwise_weighted,
+                                 jaccard_score_arthery_region_based, jaccard_score_arthery_region_based_weighted, jaccard_score_ureter_pixelwise,
+                                 jaccard_score_ureter_pixelwise_weighted, jaccard_score_ureter_region_based, jaccard_score_ureter_region_based_weighted
+                                 , jaccard_score_nerve_pixelwise, jaccard_score_nerve_pixelwise_weighted, jaccard_score_nerve_region_based, jaccard_score_nerve_region_based_weighted,
+                                 jaccard_score_pixelwise, jaccard_score_pixelwise_weighted, jaccard_score_region_based, jaccard_score_region_based_weighted,
+                                 dice_score_arthery_pixelwise, dice_score_arthery_pixelwise_weighted, dice_score_arthery_region_based, dice_score_arthery_region_based_weighted,
+                                 dice_score_ureter_pixelwise, dice_score_ureter_pixelwise_weighted, dice_score_ureter_region_based, dice_score_ureter_region_based_weighted,
+                                 dice_score_nerve_pixelwise, dice_score_nerve_pixelwise_weighted, dice_score_nerve_region_based, dice_score_nerve_region_based_weighted,
+                                 dice_score_pixelwise, dice_score_pixelwise_weighted, dice_score_region_based, dice_score_region_based_weighted])
 
             del nerve_model
             del arthery_model
             del ureter_model
             del reg_pred_1
-            del reg_pred_2
             del indices
             del values
